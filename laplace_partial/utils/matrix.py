@@ -2,13 +2,16 @@ from math import pow
 import torch
 import numpy as np
 from typing import Union
+import warnings
 
-from laplace.utils import _is_valid_scalar, symeig, kron, block_diag
+import tqdm
+
+from laplace.utils import _is_valid_scalar, symeig, kron, block_diag, _is_batchnorm
 
 
 __all__ = ['Kron', 'KronDecomposed']
 
-
+TRANSFORMER_COMPATIBLE_MODULES = (torch.nn.Embedding, torch.nn.Linear)
 class Kron:
     """Kronecker factored approximate curvature representation for a corresponding
     neural network.
@@ -24,6 +27,44 @@ class Kron:
     """
     def __init__(self, kfacs):
         self.kfacs = kfacs
+
+    @classmethod
+    def _init_from_model(cls, model, device):
+
+        kfacs = list()
+        for module in model.modules():
+
+            if not isinstance(module, TRANSFORMER_COMPATIBLE_MODULES):
+                continue
+
+            if isinstance(module, torch.nn.Embedding):
+                continue
+                B = torch.zeros((module.embedding_dim, module.embedding_dim), device=device)
+                A = torch.zeros((module.num_embeddings, module.num_embeddings), device=device)
+
+                kfacs.append([B, A])
+                continue
+            if not getattr(module, 'partial', True):
+                continue
+
+            if isinstance(module, torch.nn.Linear) and module.bias is not None:
+                # split up bias and weights
+                A = torch.zeros((module.in_features, module.in_features), device=device)
+                B = torch.zeros((module.out_features, module.out_features), device=device)
+
+                kfacs.append([B, A])
+                kfacs.append([B])
+
+            elif isinstance(module, torch.nn.Linear):
+                raise NotImplementedError("Not yet implemented for nn.Linear without bias")
+                # p, q = np.prod(module.kron.B.shape), np.prod(stats.kron.A.shape)
+                # if p == q == 1:
+                #     kfacs.append([stats.kron.B * stats.kron.A])
+                # else:
+                #     kfacs.append([stats.kron.B, stats.kron.A])
+            else:
+                raise ValueError(f'Whats happening with {module}?')
+        return Kron(kfacs)
 
     @classmethod
     def init_from_model(cls, model, device):
@@ -72,8 +113,17 @@ class Kron:
         """
         if not isinstance(other, Kron):
             raise ValueError('Can only add Kron to Kron.')
-        kfacs = [[Hi.add(Hj) for Hi, Hj in zip(Fi, Fj)]
-                 for Fi, Fj in zip(self.kfacs, other.kfacs)]
+
+        kfacs = []
+        for Fi, Fj in zip(self.kfacs, other.kfacs):
+            kfacs.append([])
+            for Hi, Hj in zip(Fi, Fj):
+                try:
+                    kfacs[-1].append(Hi.add(Hj))
+                except:
+                    breakpoint()
+        # kfacs = [[Hi.add(Hj) for Hi, Hj in zip(Fi, Fj)]
+        #          for Fi, Fj in zip(self.kfacs, other.kfacs)]
         return Kron(kfacs)
 
     def __mul__(self, scalar: Union[float, torch.Tensor]):
@@ -111,7 +161,8 @@ class Kron:
         kron_decomposed : KronDecomposed
         """
         eigvecs, eigvals = list(), list()
-        for F in self.kfacs:
+        pbar = tqdm.tqdm(self.kfacs, desc='decomposing')
+        for F in pbar:
             Qs, ls = list(), list()
             for Hi in F:
                 l, Q = symeig(Hi)

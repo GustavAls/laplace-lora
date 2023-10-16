@@ -9,7 +9,8 @@ from torch.distributions.multivariate_normal import _precision_to_scale_tril
 
 
 __all__ = ['get_nll', 'validate', 'parameters_per_layer', 'invsqrt_precision', 'kron',
-           'diagonal_add_scalar', 'symeig', 'block_diag', 'expand_prior_precision']
+           'diagonal_add_scalar', 'symeig', 'block_diag', 'expand_prior_precision', '_is_valid_scalar',
+           '_is_valid_scalar', '_is_batchnorm']
 
 
 def get_nll(out_dist, targets):

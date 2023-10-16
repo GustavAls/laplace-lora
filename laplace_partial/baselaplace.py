@@ -4,9 +4,9 @@ import torch
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from torch.distributions import MultivariateNormal
 
-from laplace.utils import (parameters_per_layer, invsqrt_precision, 
-                           get_nll, validate, Kron, normal_samples)
-from laplace.curvature import AsdlGGN, AsdlHessian
+from laplace_partial.utils import (parameters_per_layer, invsqrt_precision,
+                                   get_nll, validate, Kron, normal_samples)
+from laplace_partial.curvature import AsdlGGN, AsdlHessian
 from tqdm import tqdm
 import time
 import random
@@ -34,7 +34,7 @@ class BaseLaplace:
     temperature : float, default=1
         temperature of the likelihood; lower temperature leads to more
         concentrated posterior and vice versa.
-    backend : subclasses of `laplace.curvature.CurvatureInterface`
+    backend : subclasses of `laplace_partial.curvature.CurvatureInterface`
         backend for access to curvature/Hessian approximations
     backend_kwargs : dict, default=None
         arguments passed to the backend on initialization, for example to
@@ -58,6 +58,12 @@ class BaseLaplace:
                 trainable_parameters.append(p)
         # trainable_parameters = [p for p in self.model.parameters() if p.requires_grad]
 
+
+        if hasattr(model, 'num_partial_layers'):
+            self.n_layers = model.num_partial_layers
+        else:
+            self.n_layers = len(trainable_parameters)
+
         # Get the number of trainable parameters
         self.n_params = len(parameters_to_vector(trainable_parameters).detach())
 
@@ -66,7 +72,7 @@ class BaseLaplace:
 
         # Get the number of layers with trainable parameters
         # self.n_layers = len(trainable_layers)
-        self.n_layers = len(trainable_parameters)
+        #
 
         if prior_precision is not None:
             self.prior_precision = prior_precision
@@ -784,7 +790,7 @@ class KronLaplace(ParametricLaplace):
     Mathematically, we have for each parameter group, e.g., torch.nn.Module,
     that \\P\\approx Q \\otimes H\\.
     See `BaseLaplace` for the full interface and see
-    `laplace.utils.matrix.Kron` and `laplace.utils.matrix.KronDecomposed` for the structure of
+    `laplace_partial.utils.matrix.Kron` and `laplace_partial.utils.matrix.KronDecomposed` for the structure of
     the Kronecker factors. `Kron` is used to aggregate factors by summing up and
     `KronDecomposed` is used to add the prior, a Hessian factor (e.g. temperature),
     and computing posterior covariances, marginal likelihood, etc.
@@ -803,14 +809,15 @@ class KronLaplace(ParametricLaplace):
 
     def _init_H(self):
         print('======_init_H======')
-        self.H = Kron.init_from_model(self.model, self._device)
+        self.H = Kron._init_from_model(self.model, self._device)
 
     def _curv_closure(self, batch, N):
         return self.backend.kron(batch, N=N)
 
     @staticmethod
     def _rescale_factors(kron, factor):
-        for F in kron.kfacs:
+        pbar = tqdm(kron.kfacs, desc='Rescaling K-FAC')
+        for F in pbar:
             if len(F) == 2:
                 F[1] *= factor
         return kron

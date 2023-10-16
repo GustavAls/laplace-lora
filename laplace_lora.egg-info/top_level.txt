@@ -1,1 +1,1 @@
-laplace
+laplace_partial

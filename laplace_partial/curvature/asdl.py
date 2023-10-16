@@ -25,7 +25,10 @@ from asdl.operations import OP_BATCH_GRADS
 import asdl
 
 def batch_gradient(model, closure, input_shape,return_outputs=False):
-    with extend(model, OP_BATCH_GRADS) as cxt:
+
+    ignore_modules = model.get_ignore_modules(model)
+
+    with extend(model, OP_BATCH_GRADS, ignore_modules=ignore_modules) as cxt:
         outputs = closure()
         grads = []
         N = input_shape[0]
@@ -147,6 +150,12 @@ class AsdlInterface(CurvatureInterface):
         for module in self.model.modules():
             if _is_batchnorm(module):
                 warnings.warn('BatchNorm unsupported for Kron, ignore.')
+                continue
+
+            if isinstance(module, torch.nn.Embedding):
+                continue
+
+            if not getattr(module, 'partial', True):
                 continue
 
             stats = getattr(module, 'fisher', None)
