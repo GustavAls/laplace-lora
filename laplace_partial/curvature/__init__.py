@@ -1,9 +1,9 @@
 import logging
 
-from laplace.curvature.curvature import CurvatureInterface, GGNInterface, EFInterface
+from laplace_partial.curvature.curvature import CurvatureInterface, GGNInterface, EFInterface
 
 try:
-    from laplace.curvature.asdl import AsdlHessian, AsdlGGN, AsdlEF, AsdlInterface
+    from laplace_partial.curvature.asdl import AsdlHessian, AsdlGGN, AsdlEF, AsdlInterface
 except ModuleNotFoundError:
     logging.info('asdfghjkl backend not available.')
 

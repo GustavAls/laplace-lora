@@ -6,7 +6,7 @@ import warnings
 
 import tqdm
 
-from laplace.utils import _is_valid_scalar, symeig, kron, block_diag, _is_batchnorm
+from laplace_partial.utils import _is_valid_scalar, symeig, kron, block_diag, _is_batchnorm
 
 
 __all__ = ['Kron', 'KronDecomposed']
