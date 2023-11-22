@@ -1,7 +1,7 @@
 import warnings
 import numpy as np
 import torch
-
+import asdl
 from asdl.matrices import (
     FISHER_EXACT, FISHER_MC, FISHER_EMP, SHAPE_KRON, SHAPE_DIAG, SHAPE_FULL
 )

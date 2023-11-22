@@ -6,7 +6,7 @@ from torch.distributions import MultivariateNormal
 
 from laplace_partial.utils import (parameters_per_layer, invsqrt_precision,
                                    get_nll, validate, Kron, normal_samples)
-from Laplace.laplace.curvature import AsdlGGN, AsdlHessian
+from laplace_partial.curvature import AsdlGGN, AsdlHessian
 from tqdm import tqdm
 import time
 import random
