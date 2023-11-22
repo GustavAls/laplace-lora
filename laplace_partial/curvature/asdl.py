@@ -57,8 +57,8 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
 asdl.batch_gradient = batch_gradient
     
 
-from Laplace.laplace.curvature import CurvatureInterface, GGNInterface, EFInterface
-from Laplace.laplace.utils import Kron, _is_batchnorm
+from laplace_partial.curvature import CurvatureInterface, GGNInterface, EFInterface
+from laplace_partial.utils import Kron, _is_batchnorm
 
 EPS = 1e-6
 
