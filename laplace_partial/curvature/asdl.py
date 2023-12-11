@@ -23,39 +23,66 @@ from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from asdl.core import extend
 from asdl.operations import OP_BATCH_GRADS
 import asdl
+from tqdm import tqdm
+
 
 def batch_gradient(model, closure, input_shape,return_outputs=False):
 
-    ignore_modules = model.get_ignore_modules(model)
+    cnt = 0
+    flatten = lambda x: [item for y in x for item in y]
 
-    with extend(model, OP_BATCH_GRADS, ignore_modules=ignore_modules) as cxt:
-        outputs = closure()
-        grads = []
-        N = input_shape[0]
-        L = input_shape[-1]
-        for module in model.modules():
-            g = cxt.batch_grads(module, flatten=True)
-            if g is not None:
-                if len(input_shape) == 2:
-                    if g.shape[0] > N:
-                        grads.append(g.reshape(*input_shape,-1).sum(-2))
+    ignore_modules = model.get_ignore_modules(model)
+    if (batch_size := getattr(model, 'batched_modules',0)) > 0:
+        all_modules = [m for m in model.modules() if getattr(m, 'partial', False)]
+        batches = [all_modules[(i * batch_size): (i +1)*batch_size]
+                   for i in range(int(len(all_modules)/batch_size))]
+
+        num_collected_batches = sum([len(ba) for ba in batches])
+        length_difference = len(all_modules) - num_collected_batches
+        if length_difference != 0:
+            batches.append(all_modules[-length_difference:])
+
+    else:
+        batches = [""]
+    grads = []
+    pbar = tqdm(batches, desc='Getting bathed x2 gradients')
+
+    for idx, batch in enumerate(pbar):
+        extra_ignore_modules = flatten([ba for i, ba in enumerate(batches) if i != idx])
+        with extend(model, OP_BATCH_GRADS, ignore_modules=ignore_modules + extra_ignore_modules) as cxt:
+            outputs = closure()
+            N = input_shape[0]
+            L = input_shape[-1]
+            for module in model.modules():
+                cnt += 1
+                g = cxt.batch_grads(module, flatten=True)
+                if g is not None:
+                    if len(input_shape) == 2:
+                        if g.shape[0] > N:
+                            grads.append(g.reshape(*input_shape,-1).sum(-2))
+                        else:
+                            grads.append(g)
                     else:
-                        grads.append(g)
-                else:
-                    if g.shape[0] > N*L:
-                        grads.append(g.reshape(*input_shape,-1).sum(-2).sum(-2))
-                    elif g.shape[0] > N:
-                        grads.append(g.reshape(*input_shape[:-1],-1).sum(-2))
-                    else:
-                        grads.append(g)
-        grads = torch.cat(grads, dim=-1)  # (n, p)
+                        if g.shape[0] > N*L:
+                            grads.append(g.reshape(*input_shape,-1).sum(-2).sum(-2))
+                        elif g.shape[0] > N:
+                            grads.append(g.reshape(*input_shape[:-1],-1).sum(-2))
+                        else:
+                            grads.append(g)
+
+                    if hasattr(module, 'subnetwork_indices'):
+                        grads[-1] = grads[-1][module.subnetwork_indices].unsqueeze(0)
+
+    pbar.close()
+    grads = torch.cat(grads, dim=-1)  # (n, p)
     if return_outputs:
         return grads, outputs
     else:
         return grads
-    
+
+
 asdl.batch_gradient = batch_gradient
-    
+
 
 from laplace.curvature import CurvatureInterface, GGNInterface, EFInterface
 from laplace.utils import Kron, _is_batchnorm
@@ -164,8 +191,15 @@ class AsdlInterface(CurvatureInterface):
 
             if hasattr(module, 'bias') and module.bias is not None:
                 # split up bias and weights
-                kfacs.append([stats.kron.B, stats.kron.A])
-                kfacs.append([stats.kron.B])
+                if getattr(module, 'subsample_fisher_A_B', False):
+                    (ind_input, ind_output), ind_bias = module.param_indices
+                    kfacs.append([self.resize_B(stats.kron.B, ind_output),
+                                  self.resize_B(stats.kron.A, ind_input)])
+                    kfacs.append([self.resize_B(stats.kron.B, ind_bias)])
+                else:
+                    kfacs.append([stats.kron.B, stats.kron.A])
+                    kfacs.append([stats.kron.B])
+
             elif hasattr(module, 'weight'):
                 p, q = np.prod(stats.kron.B.shape), np.prod(stats.kron.A.shape)
                 if p == q == 1:
@@ -175,7 +209,6 @@ class AsdlInterface(CurvatureInterface):
             else:
                 raise ValueError(f'Whats happening with {module}?')
         return Kron(kfacs)
-
     @staticmethod
     def _rescale_kron_factors(kron, N):
         for F in kron.kfacs:

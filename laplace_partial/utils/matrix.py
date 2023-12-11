@@ -49,11 +49,20 @@ class Kron:
 
             if isinstance(module, torch.nn.Linear) and module.bias is not None:
                 # split up bias and weights
-                A = torch.zeros((module.in_features, module.in_features), device=device)
-                B = torch.zeros((module.out_features, module.out_features), device=device)
 
-                kfacs.append([B, A])
-                kfacs.append([B])
+                if getattr(module, 'subsample_fisher_A_B', False):
+                    (ind_input, ind_output), ind_bias = module.param_indices
+                    B_w = torch.zeros((ind_output.shape[0], ind_output.shape[0]), device=device)
+                    B_b = torch.zeros((ind_bias.shape[0], ind_bias.shape[0]), device=device)
+                    A = torch.zeros((ind_input.shape[0], ind_input.shape[0]), device=device)
+                    kfacs.append([B_w, A])
+                    kfacs.append([B_b])
+                else:
+                    # A = torch.zeros((module.in_features, module.in_features), device=device)
+                    B = torch.zeros((module.out_features, module.out_features), device=device)
+                    A = torch.zeros((module.in_features, module.in_features), device=device)
+                    kfacs.append([B, A])
+                    kfacs.append([B])
 
             elif isinstance(module, torch.nn.Linear):
                 raise NotImplementedError("Not yet implemented for nn.Linear without bias")
@@ -64,7 +73,7 @@ class Kron:
                 #     kfacs.append([stats.kron.B, stats.kron.A])
             else:
                 raise ValueError(f'Whats happening with {module}?')
-        return Kron(kfacs)
+        return cls(kfacs)
 
     @classmethod
     def init_from_model(cls, model, device):
@@ -118,10 +127,8 @@ class Kron:
         for Fi, Fj in zip(self.kfacs, other.kfacs):
             kfacs.append([])
             for Hi, Hj in zip(Fi, Fj):
-                try:
-                    kfacs[-1].append(Hi.add(Hj))
-                except:
-                    breakpoint()
+                kfacs[-1].append(Hi.add(Hj))
+
         # kfacs = [[Hi.add(Hj) for Hi, Hj in zip(Fi, Fj)]
         #          for Fi, Fj in zip(self.kfacs, other.kfacs)]
         return Kron(kfacs)
