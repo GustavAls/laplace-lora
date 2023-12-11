@@ -172,6 +172,7 @@ class AsdlInterface(CurvatureInterface):
     def _ggn_type(self):
         raise NotImplementedError
 
+
     def _get_kron_factors(self, M):
         kfacs = list()
         for module in self.model.modules():
