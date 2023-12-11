@@ -1,7 +1,7 @@
 import warnings
 import numpy as np
 import torch
-
+import asdl
 from asdl.matrices import (
     FISHER_EXACT, FISHER_MC, FISHER_EMP, SHAPE_KRON, SHAPE_DIAG, SHAPE_FULL
 )
@@ -84,8 +84,8 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
 asdl.batch_gradient = batch_gradient
 
 
-from laplace.curvature import CurvatureInterface, GGNInterface, EFInterface
-from laplace.utils import Kron, _is_batchnorm
+from laplace_partial.curvature import CurvatureInterface, GGNInterface, EFInterface
+from laplace_partial.utils import Kron, _is_batchnorm
 
 EPS = 1e-6
 
