@@ -25,6 +25,14 @@ from asdl.operations import OP_BATCH_GRADS
 import asdl
 from tqdm import tqdm
 
+def batch_grads(cxt, module, flatten=False):
+    grads = cxt.get_result(module, OP_BATCH_GRADS)
+    if grads is not None and flatten:
+        for key in grads.keys():
+            grads[key] = grads[key].sum(0).unsqueeze(0)
+        return torch.cat([g.flatten(start_dim=1) for g in grads.values()], dim=1)
+    else:
+        return grads
 
 def batch_gradient(model, closure, input_shape,return_outputs=False):
 
@@ -44,8 +52,9 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
 
     else:
         batches = [""]
+
     grads = []
-    pbar = tqdm(batches, desc='Getting bathed x2 gradients')
+    pbar = tqdm(batches, desc='Getting bathed x2 gradients', disable=True)
 
     for idx, batch in enumerate(pbar):
         extra_ignore_modules = flatten([ba for i, ba in enumerate(batches) if i != idx])
@@ -53,9 +62,10 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
             outputs = closure()
             N = input_shape[0]
             L = input_shape[-1]
+
             for module in model.modules():
                 cnt += 1
-                g = cxt.batch_grads(module, flatten=True)
+                g = batch_grads(cxt, module, flatten=True)
                 if g is not None:
                     if len(input_shape) == 2:
                         if g.shape[0] > N:
@@ -79,7 +89,6 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
         return grads, outputs
     else:
         return grads
-
 
 asdl.batch_gradient = batch_gradient
 
