@@ -139,6 +139,10 @@ class AsdlInterface(CurvatureInterface):
             Js.append(Ji)
         Js = torch.stack(Js, dim=1)
         return Js, f
+    def resize_B(self, B, indices):
+        B = B[indices]
+        B = B[:, indices]
+        return B
 
     def gradients(self, x, y):
         """Compute gradients \\(\\nabla_\\theta \\ell(f(x;\\theta, y)\\) at current parameter
