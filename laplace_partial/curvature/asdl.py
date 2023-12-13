@@ -45,7 +45,7 @@ def batch_gradient(model, closure, input_shape,return_outputs=False):
     else:
         batches = [""]
     grads = []
-    pbar = tqdm(batches, desc='Getting bathed x2 gradients')
+    pbar = tqdm(batches, desc='Getting batched x2 gradients')
 
     for idx, batch in enumerate(pbar):
         extra_ignore_modules = flatten([ba for i, ba in enumerate(batches) if i != idx])
