@@ -245,8 +245,7 @@ class GGNInterface(CurvatureInterface):
             Js, f = self.jacobians(x)
         loss, H_ggn = self._get_full_ggn(Js, f, y)
 
-        return loss, H_ggn
-
+        return loss, H_ggn, f
 
 class EFInterface(CurvatureInterface):
     """Interface for Empirical Fisher as Hessian approximation.

@@ -5,15 +5,15 @@ from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from torch.distributions import MultivariateNormal
 
 from laplace_partial.utils import (parameters_per_layer, invsqrt_precision,
-                                   get_nll, validate, Kron, normal_samples)
+                                   get_nll, validate, Kron, normal_samples, FeatureExtractor)
 from laplace_partial.curvature import AsdlGGN, AsdlHessian
 from tqdm import tqdm
 import time
 import random
+import copy
 
 __all__ = ['BaseLaplace', 'ParametricLaplace',
-           'FullLaplace', 'KronLaplace', 'DiagLaplace', 'LowRankLaplace']
-
+           'FullLaplace', 'KronLaplace', 'DiagLaplace', 'LowRankLaplace', 'LLLaplace', 'FullLLLaplace']
 
 
 class BaseLaplace:
@@ -40,6 +40,7 @@ class BaseLaplace:
         arguments passed to the backend on initialization, for example to
         set the number of MC samples for stochastic approximations.
     """
+
     def __init__(self, model, likelihood, sigma_noise=1., prior_precision=None,
                  prior_mean=0., temperature=1., backend=None, backend_kwargs=None):
         if likelihood not in ['classification', 'regression']:
@@ -53,11 +54,10 @@ class BaseLaplace:
 
         # Get a list of all trainable parameters
         trainable_parameters = []
-        for name,p in self.model.named_parameters():
+        for name, p in self.model.named_parameters():
             if p.requires_grad and 'modules_to_save' not in name:
                 trainable_parameters.append(p)
         # trainable_parameters = [p for p in self.model.parameters() if p.requires_grad]
-
 
         if hasattr(model, 'num_partial_layers'):
             self.n_layers = model.num_partial_layers
@@ -77,7 +77,7 @@ class BaseLaplace:
         if prior_precision is not None:
             self.prior_precision = prior_precision
         elif prior_precision is None:
-            self.prior_precision = torch.ones(self.n_layers).to(self._device)      #prior_precision
+            self.prior_precision = torch.ones(self.n_layers).to(self._device)  # prior_precision
 
         self.prior_mean = prior_mean
         if sigma_noise != 1 and likelihood != 'regression':
@@ -100,7 +100,7 @@ class BaseLaplace:
     @property
     def backend(self):
         return self._backend_cls(self.model, self.likelihood,
-                                              **self._backend_kwargs)
+                                 **self._backend_kwargs)
 
     def _curv_closure(self, batch, N):
         raise NotImplementedError
@@ -264,7 +264,7 @@ class BaseLaplace:
                 neg_log_marglik = -self.log_marginal_likelihood(prior_precision=prior_prec)
                 neg_log_marglik.backward()
                 optimizer.step()
-                if (_+1) % 100 == 0:
+                if (_ + 1) % 100 == 0:
                     print(_, neg_log_marglik)
             self.prior_precision = log_prior_prec.detach().exp()
             del prior_prec, neg_log_marglik
@@ -275,6 +275,7 @@ class BaseLaplace:
             # batched gradient descent optimizing prior precision to maximize validation log-likelihood
             if val_loader is None:
                 raise ValueError('val_gd requires a validation set DataLoader')
+
             def divide_into_batches(data, batch_size):
                 return [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
 
@@ -306,7 +307,7 @@ class BaseLaplace:
                     Js = torch.stack(Js).to(self._device)
                     f_mu = torch.stack(f_mu).to(self._device)
                     target = torch.tensor(target).to(self._device)
-                    
+
                     optimizer.zero_grad()
                     self.prior_precision = log_prior_prec.exp()
 
@@ -314,7 +315,9 @@ class BaseLaplace:
                     f_mu = f_mu.expand(samples, -1, -1).to(self._device)
                     f_var = f_var.expand(samples, -1, -1, -1)
                     eps = torch.randn_like(f_mu).unsqueeze(-1).to(f_mu.dtype).to(self._device)
-                    probs = torch.softmax(f_mu + (torch.linalg.cholesky(f_var + torch.eye(f_var.shape[-1]).to(f_var.device)*1e-6).to(f_mu.dtype) @ eps).squeeze(-1), dim=-1).mean(0)
+                    probs = torch.softmax(f_mu + (
+                                torch.linalg.cholesky(f_var + torch.eye(f_var.shape[-1]).to(f_var.device) * 1e-6).to(
+                                    f_mu.dtype) @ eps).squeeze(-1), dim=-1).mean(0)
                     nll = -torch.log(probs[torch.arange(probs.shape[0]), target]).sum()
                     nll.backward()
                     optimizer.step()
@@ -326,8 +329,7 @@ class BaseLaplace:
 
             self.prior_precision = log_prior_prec.detach().clone().exp()
             del data_list, shuffled_batches
-        
-        
+
     @property
     def sigma_noise(self):
         return self._sigma_noise
@@ -390,7 +392,7 @@ class ParametricLaplace(BaseLaplace):
 
     def _init_H(self):
         raise NotImplementedError
-    
+
     def _check_H_init(self):
         if self.H is None:
             raise AttributeError('Laplace not fitted. Run fit() first.')
@@ -421,7 +423,7 @@ class ParametricLaplace(BaseLaplace):
                 # print('appending')
                 mean.append(param.detach())
         self.mean = parameters_to_vector(mean).detach()
-        
+
         print('parameters shape', self.mean.shape)
 
         batch = next(iter(train_loader))
@@ -448,7 +450,7 @@ class ParametricLaplace(BaseLaplace):
             self._backend = None
             self.model.zero_grad()
 
-            loss_batch, H_batch,f = self._curv_closure(batch, N)
+            loss_batch, H_batch, f = self._curv_closure(batch, N)
             self.loss += loss_batch
             self.H += H_batch
 
@@ -457,7 +459,6 @@ class ParametricLaplace(BaseLaplace):
         self.n_data += N
 
         print('H len', self.H.__len__())
-
 
     @property
     def scatter(self):
@@ -573,7 +574,7 @@ class ParametricLaplace(BaseLaplace):
 
         return self.log_likelihood - 0.5 * (self.log_det_ratio + self.scatter)
 
-    def __call__(self, batch, pred_type='glm', link_approx='probit', n_samples=100, 
+    def __call__(self, batch, pred_type='glm', link_approx='probit', n_samples=100,
                  diagonal_output=False, generator=None):
         """Compute the posterior predictive on input data `x`.
 
@@ -589,7 +590,7 @@ class ParametricLaplace(BaseLaplace):
 
         link_approx : {'mc', 'probit', 'bridge', 'bridge_norm'}
             how to approximate the classification link function for the `'glm'`.
-            For `pred_type='nn'`, only 'mc' is possible. 
+            For `pred_type='nn'`, only 'mc' is possible.
 
         n_samples : int
             number of samples for `link_approx='mc'`.
@@ -621,7 +622,7 @@ class ParametricLaplace(BaseLaplace):
 
         if pred_type == 'nn' and link_approx != 'mc':
             raise ValueError('Only mc link approximation is supported for nn prediction type.')
-        
+
         if generator is not None:
             if not isinstance(generator, torch.Generator) or generator.device != batch['labels'].device:
                 raise ValueError('Invalid random generator (check type and device).')
@@ -633,7 +634,7 @@ class ParametricLaplace(BaseLaplace):
                 return f_mu, f_var
             # classification
             if link_approx == 'mc':
-                return self.predictive_samples(batch, pred_type='glm', n_samples=n_samples, 
+                return self.predictive_samples(batch, pred_type='glm', n_samples=n_samples,
                                                diagonal_output=diagonal_output).mean(dim=0)
             elif link_approx == 'probit':
                 kappa = 1 / torch.sqrt(1. + np.pi / 8 * f_var.diagonal(dim1=1, dim2=2))
@@ -652,11 +653,11 @@ class ParametricLaplace(BaseLaplace):
                 # optional: variance correction
                 if link_approx == 'bridge_norm':
                     f_var_diag_mean = f_var_diag.mean(dim=1)
-                    f_var_diag_mean /= torch.as_tensor([K/2], device=self._device).sqrt()
+                    f_var_diag_mean /= torch.as_tensor([K / 2], device=self._device).sqrt()
                     f_mu /= f_var_diag_mean.sqrt().unsqueeze(-1)
                     f_var_diag /= f_var_diag_mean.unsqueeze(-1)
                 sum_exp = torch.exp(-f_mu).sum(dim=1).unsqueeze(-1)
-                alpha = (1 - 2/K + f_mu.exp() / K**2 * sum_exp) / f_var_diag
+                alpha = (1 - 2 / K + f_mu.exp() / K ** 2 * sum_exp) / f_var_diag
                 return torch.nan_to_num(alpha / alpha.sum(dim=1).unsqueeze(-1), nan=1.0)
         else:
             samples = self._nn_predictive_samples(x, n_samples)
@@ -664,7 +665,7 @@ class ParametricLaplace(BaseLaplace):
                 return samples.mean(dim=0), samples.var(dim=0)
             return samples.mean(dim=0)
 
-    def predictive_samples(self, x, pred_type='glm', n_samples=100, 
+    def predictive_samples(self, x, pred_type='glm', n_samples=100,
                            diagonal_output=False, generator=None):
         """Sample from the posterior predictive on input data `x`.
         Can be used, for example, for Thompson sampling.
@@ -843,7 +844,7 @@ class KronLaplace(ParametricLaplace):
             self.H_facs += self.H
         # Decompose to self.H for all required quantities but keep H_facs for further inference
         self.H = self.H_facs.decompose(damping=self.damping)
-    
+
     def fit_temp(self, train_loader, override=True, steps=1000):
         if override:
             self.H_facs = None
@@ -906,25 +907,26 @@ class KronLaplace(ParametricLaplace):
 
 
 class LowRankLaplace(ParametricLaplace):
-    """Laplace approximation with low-rank log likelihood Hessian (approximation). 
+    """Laplace approximation with low-rank log likelihood Hessian (approximation).
     The low-rank matrix is represented by an eigendecomposition (vecs, values).
     Based on the chosen `backend`, either a true Hessian or, for example, GGN
     approximation could be used.
     The posterior precision is computed as
     \\( P = V diag(l) V^T + P_0.\\)
-    To sample, compute the functional variance, and log determinant, algebraic tricks 
+    To sample, compute the functional variance, and log determinant, algebraic tricks
     are usedto reduce the costs of inversion to the that of a \\(K \times K\\) matrix
     if we have a rank of K.
-    
+
     See `BaseLaplace` for the full interface.
     """
     _key = ('all', 'lowrank')
-    def __init__(self, model, likelihood, sigma_noise=1, prior_precision=None, prior_mean=0, 
+
+    def __init__(self, model, likelihood, sigma_noise=1, prior_precision=None, prior_mean=0,
                  temperature=1, backend=AsdlHessian, backend_kwargs=None):
-        super().__init__(model, likelihood, sigma_noise=sigma_noise, 
-                         prior_precision=prior_precision, prior_mean=prior_mean, 
+        super().__init__(model, likelihood, sigma_noise=sigma_noise,
+                         prior_precision=prior_precision, prior_mean=prior_mean,
                          temperature=temperature, backend=backend, backend_kwargs=backend_kwargs)
-    
+
     def _init_H(self):
         self.H = None
 
@@ -1079,3 +1081,295 @@ class FunctionalLaplace(BaseLaplace):
 
 class SoDLaplace(FunctionalLaplace):
     pass
+
+
+class FullLaplace(ParametricLaplace):
+    """Laplace approximation with full, i.e., dense, log likelihood Hessian approximation
+    and hence posterior precision. Based on the chosen `backend` parameter, the full
+    approximation can be, for example, a generalized Gauss-Newton matrix.
+    Mathematically, we have \\(P \\in \\mathbb{R}^{P \\times P}\\).
+    See `BaseLaplace` for the full interface.
+    """
+    # key to map to correct subclass of BaseLaplace, (subset of weights, Hessian structure)
+    _key = ('all', 'full')
+
+    def __init__(self, model, likelihood, sigma_noise=1., prior_precision=1.,
+                 prior_mean=0., temperature=1., enable_backprop=False, backend=None, backend_kwargs=None):
+        super().__init__(model, likelihood, sigma_noise, prior_precision,
+                         prior_mean, temperature, backend, backend_kwargs)
+        self._posterior_scale = None
+
+    def _init_H(self):
+        self.H = torch.zeros(self.n_params, self.n_params, device=self._device)
+
+    def _curv_closure(self, X, N):
+        y = X['labels']
+        return self.backend.full(X, y, N=N)
+
+    def fit(self, train_loader, override=True):
+        self._posterior_scale = None
+        return super().fit(train_loader, override=override)
+
+    def _compute_scale(self):
+        self._posterior_scale = invsqrt_precision(self.posterior_precision)
+
+    @property
+    def posterior_scale(self):
+        """Posterior scale (square root of the covariance), i.e.,
+        \\(P^{-\\frac{1}{2}}\\).
+
+        Returns
+        -------
+        scale : torch.tensor
+            `(parameters, parameters)`
+        """
+        if self._posterior_scale is None:
+            self._compute_scale()
+        return self._posterior_scale
+
+    @property
+    def posterior_covariance(self):
+        """Posterior covariance, i.e., \\(P^{-1}\\).
+
+        Returns
+        -------
+        covariance : torch.tensor
+            `(parameters, parameters)`
+        """
+        scale = self.posterior_scale
+        return scale @ scale.T
+
+    @property
+    def posterior_precision(self):
+        """Posterior precision \\(P\\).
+
+        Returns
+        -------
+        precision : torch.tensor
+            `(parameters, parameters)`
+        """
+        self._check_H_init()
+        return self._H_factor * self.H + torch.diag(self.prior_precision_diag)
+
+    @property
+    def log_det_posterior_precision(self):
+        return self.posterior_precision.logdet()
+
+    def square_norm(self, value):
+        delta = value - self.mean
+        return delta @ self.posterior_precision @ delta
+
+    def functional_variance(self, Js):
+        return torch.einsum('ncp,pq,nkq->nck', Js, self.posterior_covariance, Js)
+
+    def functional_covariance(self, Js):
+        n_batch, n_outs, n_params = Js.shape
+        Js = Js.reshape(n_batch * n_outs, n_params)
+        return torch.einsum('np,pq,mq->nm', Js, self.posterior_covariance, Js)
+
+    def sample(self, n_samples=100):
+        dist = MultivariateNormal(loc=self.mean, scale_tril=self.posterior_scale)
+        return dist.sample((n_samples,))
+
+
+class LLLaplace(ParametricLaplace):
+    """Baseclass for all last-layer Laplace approximations in this library.
+    Subclasses specify the structure of the Hessian approximation.
+    See `BaseLaplace` for the full interface.
+
+    A Laplace approximation is represented by a MAP which is given by the
+    `model` parameter and a posterior precision or covariance specifying
+    a Gaussian distribution \\(\\mathcal{N}(\\theta_{MAP}, P^{-1})\\).
+    Here, only the parameters of the last layer of the neural network
+    are treated probabilistically.
+    The goal of this class is to compute the posterior precision \\(P\\)
+    which sums as
+    \\[
+        P = \\sum_{n=1}^N \\nabla^2_\\theta \\log p(\\mathcal{D}_n \\mid \\theta)
+        \\vert_{\\theta_{MAP}} + \\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}}.
+    \\]
+    Every subclass implements different approximations to the log likelihood Hessians,
+    for example, a diagonal one. The prior is assumed to be Gaussian and therefore we have
+    a simple form for \\(\\nabla^2_\\theta \\log p(\\theta) \\vert_{\\theta_{MAP}} = P_0 \\).
+    In particular, we assume a scalar or diagonal prior precision so that in
+    all cases \\(P_0 = \\textrm{diag}(p_0)\\) and the structure of \\(p_0\\) can be varied.
+
+    Parameters
+    ----------
+    model : torch.nn.Module or `laplace.utils.feature_extractor.FeatureExtractor`
+    likelihood : {'classification', 'regression'}
+        determines the log likelihood Hessian approximation
+    sigma_noise : torch.Tensor or float, default=1
+        observation noise for the regression setting; must be 1 for classification
+    prior_precision : torch.Tensor or float, default=1
+        prior precision of a Gaussian prior (= weight decay);
+        can be scalar, per-layer, or diagonal in the most general case
+    prior_mean : torch.Tensor or float, default=0
+        prior mean of a Gaussian prior, useful for continual learning
+    temperature : float, default=1
+        temperature of the likelihood; lower temperature leads to more
+        concentrated posterior and vice versa.
+    enable_backprop: bool, default=False
+        whether to enable backprop to the input `x` through the Laplace predictive.
+        Useful for e.g. Bayesian optimization.
+    backend : subclasses of `laplace_partial.curvature.CurvatureInterface`
+        backend for access to curvature/Hessian approximations
+    last_layer_name: str, default=None
+        name of the model's last layer, if None it will be determined automatically
+    backend_kwargs : dict, default=None
+        arguments passed to the backend on initialization, for example to
+        set the number of MC samples for stochastic approximations.
+    """
+
+    def __init__(self, model, likelihood, sigma_noise=1., prior_precision=1.,
+                 prior_mean=0., temperature=1., enable_backprop=False, backend=None, last_layer_name=None,
+                 backend_kwargs=None):
+        self.H = None
+        super().__init__(model, likelihood, sigma_noise=sigma_noise, prior_precision=1.,
+                         prior_mean=0., temperature=temperature,
+                         enable_backprop=enable_backprop, backend=backend,
+                         backend_kwargs=backend_kwargs)
+        last_layer_name = 'model.classifier'
+        self.model = FeatureExtractor(
+            copy.deepcopy(model), last_layer_name=last_layer_name
+        )
+        # self.model = model
+        if self.model.last_layer is None:
+            self.mean = None
+            self.n_params = None
+            self.n_layers = None
+            # ignore checks of prior mean setter temporarily, check on .fit()
+            self._prior_precision = prior_precision
+            self._prior_mean = prior_mean
+        else:
+            self.n_params = len(parameters_to_vector(self.model.last_layer.parameters()))
+            self.n_layers = len(list(self.model.last_layer.parameters()))
+            self.prior_precision = prior_precision
+            self.prior_mean = prior_mean
+            self.mean = self.prior_mean
+            self._init_H()
+        self._backend_kwargs['last_layer'] = True
+
+    def fit(self, train_loader, override=True):
+        """Fit the local Laplace approximation at the parameters of the model.
+
+        Parameters
+        ----------
+        train_loader : torch.data.utils.DataLoader
+            each iterate is a training batch (X, y);
+            `train_loader.dataset` needs to be set to access \\(N\\), size of the data set
+        override : bool, default=True
+            whether to initialize H, loss, and n_data again; setting to False is useful for
+            online learning settings to accumulate a sequential posterior approximation.
+        """
+        if not override:
+            raise ValueError('Last-layer Laplace approximations do not support `override=False`.')
+
+        self.model.eval()
+
+        if self.model.last_layer is None:
+            X, _ = next(iter(train_loader))
+            with torch.no_grad():
+                try:
+                    self.model.find_last_layer(X[:1].to(self._device))
+                except (TypeError, AttributeError):
+                    self.model.find_last_layer(X.to(self._device))
+            params = parameters_to_vector(self.model.last_layer.parameters()).detach()
+            self.n_params = len(params)
+            self.n_layers = len(list(self.model.last_layer.parameters()))
+            # here, check the already set prior precision again
+            self.prior_precision = self._prior_precision
+            self.prior_mean = self._prior_mean
+            self._init_H()
+
+        super().fit(train_loader, override=override)
+        self.mean = parameters_to_vector(self.model.last_layer.parameters())
+        self.mean = self.mean.detach()
+
+    def _glm_predictive_distribution(self, X, joint=False):
+        Js, f_mu = self.backend.last_layer_jacobians(X)
+
+        if joint:
+            f_mu = f_mu.flatten()  # (batch*out)
+            f_var = self.functional_covariance(Js)  # (batch*out, batch*out)
+        else:
+            f_var = self.functional_variance(Js)
+
+        return (f_mu.detach(), f_var.detach())
+
+    def _nn_predictive_samples(self, X, n_samples=100):
+        fs = list()
+        for sample in self.sample(n_samples):
+            vector_to_parameters(sample, self.model.last_layer.parameters())
+            f = self.model(X.to(self._device))
+            fs.append(f.detach() if not self.enable_backprop else f)
+        vector_to_parameters(self.mean, self.model.last_layer.parameters())
+        fs = torch.stack(fs)
+        if self.likelihood == 'classification':
+            fs = torch.softmax(fs, dim=-1)
+        return fs
+
+    @property
+    def prior_precision_diag(self):
+        """Obtain the diagonal prior precision \\(p_0\\) constructed from either
+        a scalar or diagonal prior precision.
+
+        Returns
+        -------
+        prior_precision_diag : torch.Tensor
+        """
+        if len(self.prior_precision) == 1:  # scalar
+            return self.prior_precision * torch.ones_like(self.mean)
+
+        elif len(self.prior_precision) == self.n_params:  # diagonal
+            return self.prior_precision
+
+        else:
+            raise ValueError('Mismatch of prior and model. Diagonal or scalar prior.')
+
+
+class FullLLLaplace(LLLaplace, FullLaplace):
+    """Last-layer Laplace approximation with full, i.e., dense, log likelihood Hessian approximation
+    and hence posterior precision. Based on the chosen `backend` parameter, the full
+    approximation can be, for example, a generalized Gauss-Newton matrix.
+    Mathematically, we have \\(P \\in \\mathbb{R}^{P \\times P}\\).
+    See `FullLaplace`, `LLLaplace`, and `BaseLaplace` for the full interface.
+    """
+    # key to map to correct subclass of BaseLaplace, (subset of weights, Hessian structure)
+    _key = ('last_layer', 'full')
+
+
+class KronLLLaplace(LLLaplace, KronLaplace):
+    """Last-layer Laplace approximation with Kronecker factored log likelihood Hessian approximation
+    and hence posterior precision.
+    Mathematically, we have for the last parameter group, i.e., torch.nn.Linear,
+    that \\P\\approx Q \\otimes H\\.
+    See `KronLaplace`, `LLLaplace`, and `BaseLaplace` for the full interface and see
+    `laplace_partial.utils.matrix.Kron` and `laplace_partial.utils.matrix.KronDecomposed` for the structure of
+    the Kronecker factors. `Kron` is used to aggregate factors by summing up and
+    `KronDecomposed` is used to add the prior, a Hessian factor (e.g. temperature),
+    and computing posterior covariances, marginal likelihood, etc.
+    Use of `damping` is possible by initializing or setting `damping=True`.
+    """
+    # key to map to correct subclass of BaseLaplace, (subset of weights, Hessian structure)
+    _key = ('last_layer', 'kron')
+
+    def __init__(self, model, likelihood, sigma_noise=1., prior_precision=1.,
+                 prior_mean=0., temperature=1., enable_backprop=False, backend=None, last_layer_name=None,
+                 damping=False, **backend_kwargs):
+        self.damping = damping
+        super().__init__(model, likelihood, sigma_noise, prior_precision,
+                         prior_mean, temperature, enable_backprop, backend, last_layer_name, backend_kwargs)
+
+    def _init_H(self):
+        self.H = Kron.init_from_model(self.model.last_layer, self._device)
+
+
+class DiagLLLaplace(LLLaplace, DiagLaplace):
+    """Last-layer Laplace approximation with diagonal log likelihood Hessian approximation
+    and hence posterior precision.
+    Mathematically, we have \\(P \\approx \\textrm{diag}(P)\\).
+    See `DiagLaplace`, `LLLaplace`, and `BaseLaplace` for the full interface.
+    """
+    # key to map to correct subclass of BaseLaplace, (subset of weights, Hessian structure)
+    _key = ('last_layer', 'diag')
